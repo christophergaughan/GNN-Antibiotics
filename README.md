@@ -1,316 +1,139 @@
-# GNN-Guided Antibiotic Discovery: A Rigorous Computational Pipeline
+# GNN-Guided Antibiotic Discovery
 
-**Targeting DNA Gyrase Subunit B (GyrB) with Uncertainty-Aware Graph Attention Networks**
+**Uncertainty-aware Graph Attention Networks for DNA Gyrase B (GyrB) inhibitor discovery — with an honest account of where the model fails.**
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](#reproducing)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](#reproducing)
 
----
-
-## Overview
-
-This project implements a **scientifically rigorous** pipeline for Graph Neural Network-guided antibiotic discovery. Unlike typical ML demonstrations that prioritize metrics on random splits, this work emphasizes:
-
-- **Honest generalization estimates** via scaffold-based splitting
-- **Uncertainty quantification** through ensemble methods
-- **Mechanistic interpretability** via attention weight visualization
-- **Multi-modal validation** combining ML predictions, ADMET profiling, and molecular docking
-
-### Target: DNA Gyrase Subunit B (GyrB)
-
-DNA gyrase is a validated antibacterial target with decades of clinical precedent. GyrB, the ATPase subunit, offers opportunities for:
-- Overcoming fluoroquinolone resistance (different binding site than GyrA)
-- Novel mechanism of action (ATP-competitive inhibition)
-- Reduced cross-resistance with existing antibiotics
+**Christopher L. Gaughan, Ph.D.** — *AntibodyML Consulting LLC*
 
 ---
 
-## Key Results
+## TL;DR
 
-### Honest vs. Inflated Metrics
+An end-to-end, reproducible pipeline from ChEMBL bioactivity data to ranked, multi-objective
+antibiotic candidates against **DNA Gyrase Subunit B** (GyrB; ChEMBL target `CHEMBL240`,
+structure PDB `4DUH`):
 
-| Split Type | Test AUC | Interpretation |
-|------------|----------|----------------|
-| **Scaffold** | 0.638 ± 0.03 | Generalization to novel chemotypes |
-| Random | 0.695 ± 0.02 | Inflated by scaffold memorization |
-| **Δ** | **+0.057** | The "bullshit gap" |
+> GAT activity model → ensemble uncertainty → generative expansion → drug-likeness/ADMET
+> filtering → AutoDock Vina docking → Pareto-based lead optimization.
 
-> *"Random splits overestimate performance by ~9% relative AUC. When prioritizing compounds for synthesis, that 9% is the difference between a productive campaign and chasing ghosts."*
+It is built to report **honest generalization**, not flattering metrics.
 
-### Attention Visualization
+## Why this repo reads differently
 
-The model learns chemically meaningful features:
+Most ML drug-discovery demos quote a single random-split AUC and stop. This one does the
+opposite: it measures the gap between random and scaffold splits, shows that known clinical
+inhibitors are *missed* by the model, and reports a weak ML–docking correlation. Those are
+not blemishes in the writeup — they **are** the result, and they are the point.
 
-![Attention Comparison](figures/attention_comparison.png)
+## Headline numbers (scaffold split, 5-model ensemble)
 
-- **True Actives**: Consistent biaryl scaffolds with heterocyclic termini
-- **Attention Focus**: Fluorines, heterocyclic nitrogens, aromatic cores
-- **Failure Modes**: Transparent and interpretable
+| Metric | Scaffold split | Random split |
+|---|---|---|
+| Test AUC | **0.64** (± 0.03) | 0.70 (± 0.02) |
+| Test accuracy | 0.79 | 0.76 |
+| Honest generalization gap | **+0.055 AUC** | — |
 
-### Literature Validation
+Dataset: ~1,000 GyrB compounds, **232 active / 768 inactive** (≈3:1 imbalance). The scaffold
+(Murcko) split forces the model to predict activity for *entirely unseen chemotypes*; the
+random split lets structurally similar molecules leak across train/test and inflates the AUC.
+The ~0.055 gap is the cost of that leakage — the number a random-split-only report would hide.
 
-![Known Inhibitors](figures/attention_known_inhibitors.png)
+## Pipeline
 
-Known GyrB inhibitors (novobiocin, chlorobiocin) are predicted as inactive—revealing the training data's applicability domain. The attention patterns still highlight pharmacophore-relevant atoms (coumarin carbonyls, lactone oxygens), demonstrating the model learned real chemistry despite limited training coverage.
+1. **Data** — Paginated ChEMBL query (`CHEMBL240`, IC50), deduplicated to most-potent per
+   compound, standardized to nM, quality-filtered for valid SMILES/values.
+2. **Splitting** — Bemis–Murcko scaffold split for generalization to novel chemical classes.
+3. **Representation** — 9-D atom features (atomic number, degree, formal charge, hybridization,
+   aromaticity, H-count, in-ring, ring size, chirality) + bond features → PyTorch Geometric graphs.
+4. **Model** — 3-layer **Graph Attention Network** (4 heads, BatchNorm, ELU, dropout) with
+   global attention pooling; attention weights retained for interpretability.
+5. **Ensemble** — 5 seeds, ≤150 epochs, early stopping (patience 20) → mean prediction **plus
+   standard deviation as an epistemic-uncertainty estimate** (no point estimate goes unqualified).
+6. **Generation** — BRICS fragment recombination: **2,000 → 110** drug-like → **2** with P > 0.5.
+7. **Multi-objective filtering** — SAScore, QED, Lipinski; ADMET flags (hERG, CYP, AMES,
+   PAINS/Brenk).
+8. **Docking** — GyrB (`4DUH`), custom rigid-receptor PDBQT, AutoDock Vina: **20/20** docked,
+   scores **−6.87 to −5.79 kcal/mol**.
+9. **Lead optimization** — 32 medicinal-chemistry analogs (bioisosteres, halogen scans,
+   heteroatom walks); Pareto front over ML score × docking score.
 
----
+## What the model gets wrong (read this before the plots)
 
-## Pipeline Architecture
+- **It misses every known inhibitor it was shown.** Novobiocin, chlorobiocin, a coumermycin
+  fragment, a pyrrolamide, and an aminopyrimidine all scored as *inactive* (P ≈ 0.05–0.18).
+  This is a training-distribution bias — ChEMBL GyrB data skews toward synthetic HTS/optimization
+  series, while the aminocoumarins are natural products underrepresented in training.
+- **Its "confident" calls are barely above chance.** Under 3:1 imbalance, even top scaffold-split
+  predictions sit at P ≈ 0.47–0.48, and 5 of the top 6 are false positives.
+- **ML and docking disagree (r = 0.291).** Docking here is a *triage filter and an orthogonal
+  sanity check*, not a confirmation of activity.
+- **There is no wet-lab validation.** Every candidate is a hypothesis for synthesis
+  prioritization — nothing in this repo demonstrates binding or efficacy.
+
+## On docking, specifically
+
+Docking scores **rank**; they do not **confirm**. A −6.9 kcal/mol Vina score is a reason to look
+closer, not evidence of binding. ML score and docking score are kept as **separate axes**
+(hence the Pareto treatment) precisely because they disagree — collapsing them into one
+"validated" number would be the exact overclaim this pipeline is designed to avoid.
+
+## Reproducing
+
+Colab-first by design (reference environment: **A100, High-RAM**). The notebook self-installs its
+dependencies and mounts Google Drive for persistence; `requirements.txt` is the reference version
+lock rather than the primary install path. ChEMBL data is pulled live at run time, so no dataset
+is vendored here.
+
+## Repo layout
 
 ```
-ChEMBL GyrB IC50 Data (n=1,000)
-        ↓
-Scaffold-Based Splitting (Murcko decomposition)
-        ↓
-GAT Ensemble Training (5 models, different seeds)
-        ↓
-Uncertainty-Aware Predictions (mean ± std)
-        ↓
-Molecular Generation + Filtering
-    • Chemical validity (RDKit)
-    • Drug-likeness (QED > 0.4, Lipinski)
-    • Synthetic accessibility (SAScore < 4)
-    • Novelty check (not in ChEMBL/PubChem)
-        ↓
-Multi-Objective Profiling
-    • ADMET predictions (hERG, CYP, toxicity)
-    • Selectivity (GyrB vs human TopoII)
-        ↓
-Docking Validation (AutoDock Vina → PDB:4DUH)
-        ↓
-Pareto-Ranked Candidates with Full Mechanistic Rationale
+notebooks/
+  GNN_Antibiotic_Discovery_GyrB.ipynb   # main v2 pipeline (this README describes it)
+  level1_proof_of_concept.ipynb         # Level-1 GCN prototype (prior work it builds on)
+requirements.txt                         # reference dependency versions
+LICENSE                                  # MIT
 ```
 
----
+## Methods & references
 
-## What Makes This Different
+*Bibliographic details below are given in good faith from memory; verify against Paperpile
+before any manuscript use.*
 
-| Common Practice | This Pipeline |
-|-----------------|---------------|
-| Random train/test splits | **Scaffold splits** to test generalization to novel chemotypes |
-| Single model, point estimates | **Ensemble of 5 GATs** with uncertainty quantification |
-| Black-box predictions | **Attention-based interpretability** validated against known SAR |
-| Activity prediction only | **Multi-objective profiling**: ADMET, selectivity, synthetic accessibility |
-| ML metrics in isolation | **Orthogonal validation**: docking into GyrB crystal structure |
-
----
-
-## Model Architecture
-
-```
-GATAntibiotics(
-  Input: 9 atomic features (atomic num, degree, charge, hybridization, 
-         aromaticity, H-count, ring membership, ring size, chirality)
-  
-  (input_proj): Linear(9 → 128)
-  
-  (gat_layers): 3 × GATConv(128, 32, heads=4) + residual connections
-  (batch_norms): 3 × BatchNorm1d(128)
-  
-  (gate_nn): Global attention pooling
-      Linear(128 → 64) → ELU → Linear(64 → 1) → Sigmoid
-  
-  (classifier): Linear(128 → 64) → ELU → Dropout → Linear(64 → 1)
-  
-  Parameters: 68,994
-)
-```
-
----
-
-## Repository Structure
-
-```
-GNN_antibiotics/
-├── v2_rigorous/
-│   ├── models/
-│   │   ├── gat_scaffold_model_1-5.pt    # Trained ensemble (scaffold split)
-│   │   └── gat_random_model_1-5.pt      # Comparison models (random split)
-│   ├── data/
-│   │   ├── train_scaffold.csv
-│   │   ├── val_scaffold.csv
-│   │   └── test_scaffold.csv
-│   ├── figures/
-│   │   ├── data_distribution.png
-│   │   ├── ensemble_training_results.png
-│   │   ├── attention_top_predictions.png
-│   │   ├── attention_comparison.png
-│   │   └── attention_known_inhibitors.png
-│   ├── candidates/                       # Generated molecules (Section 9)
-│   ├── docking/                          # Vina results (Section 11)
-│   └── results_summary.json
-├── GNN_Antibiotics_v2_Rigorous_Pipeline.ipynb
-├── GNN_Generation_of_new_antibiotics.ipynb  # Level 1 prototype
-└── README.md
-```
-
----
-
-## Installation
-
-```bash
-# Clone repository
-git clone https://github.com/[username]/GNN_antibiotics.git
-cd GNN_antibiotics
-
-# Install dependencies
-pip install torch torch-geometric
-pip install rdkit
-pip install chembl-webresource-client
-pip install deepchem
-pip install meeko vina  # For docking
-pip install py3Dmol     # For visualization
-```
-
-### Google Colab (Recommended)
-
-The notebook is optimized for **Colab with A100 GPU**. Upload `GNN_Antibiotics_v2_Rigorous_Pipeline.ipynb` and run cells sequentially.
-
----
-
-## Usage
-
-### Training
-
-```python
-from models import GATAntibiotics, train_model
-
-# Initialize model
-model = GATAntibiotics(
-    input_dim=9,
-    hidden_dim=128,
-    num_layers=3,
-    num_heads=4,
-    dropout=0.3
-).to(device)
-
-# Train with early stopping
-model, history = train_model(
-    model, 
-    train_loader, 
-    val_loader,
-    epochs=150,
-    patience=20
-)
-```
-
-### Inference with Uncertainty
-
-```python
-def ensemble_predict(models, smiles, device):
-    """Get prediction with uncertainty from ensemble."""
-    graph = mol_to_graph(smiles, label=0)
-    batch = Batch.from_data_list([graph]).to(device)
-    
-    preds = []
-    for model in models:
-        model.eval()
-        with torch.no_grad():
-            pred = torch.sigmoid(model(batch)).item()
-        preds.append(pred)
-    
-    return np.mean(preds), np.std(preds)
-
-# Example
-mean, std = ensemble_predict(ensemble_models, "CC1=CC=C(C=C1)C2=CN=C(N=C2N)N", device)
-print(f"P(active) = {mean:.3f} ± {std:.3f}")
-```
-
-### Attention Extraction
-
-```python
-# Get attention weights for interpretability
-model.eval()
-out, attention_weights, gate = model(batch, return_attention=True)
-
-# attention_weights: list of (num_edges, num_heads) tensors per layer
-# gate: (num_atoms, 1) global attention pooling weights
-```
-
----
-
-## Results Summary
-
-### Phase 1: Model Training ✓
-- Scaffold split AUC: **0.638 ± 0.03** (honest)
-- Random split AUC: 0.695 ± 0.02 (inflated)
-- 5-model ensemble with uncertainty quantification
-
-### Phase 2: Attention Analysis ✓
-- Chemically meaningful attention patterns
-- Model attends to: fluorines, heterocyclic N, aromatic cores
-- Known GyrB inhibitors reveal applicability domain limits
-
-### Phase 3: Molecular Generation (In Progress)
-- SAScore filtering for synthetic accessibility
-- QED filtering for drug-likeness
-- Novelty verification against ChEMBL/PubChem
-
-### Phase 4: ADMET Profiling (In Progress)
-- hERG liability prediction
-- CYP inhibition (2D6, 3A4)
-- Predicted toxicity endpoints
-
-### Phase 5: Docking Validation (In Progress)
-- AutoDock Vina against GyrB (PDB: 4DUH)
-- Binding pose analysis
-- Convergent evidence mapping
-
----
-
-## Key Insights
-
-### What the Model Learned
-1. **Biaryl + heterocycle motifs** correlate with GyrB activity
-2. **Fluorination** is a positive signal (consistent with medicinal chemistry)
-3. **Extended aromatic systems** receive high attention
-
-### What the Model Doesn't Know
-1. **Aminocoumarin chemotypes** (novobiocin, chlorobiocin) - not in training data
-2. **Pyrrolamide scaffolds** - underrepresented in ChEMBL
-3. **3D binding geometry** - 2D graph can't capture shape complementarity
-
-### Implications for Deployment
-- Use ensemble std to flag uncertain predictions
-- Implement applicability domain detection
-- Combine with docking for 3D validation
-- Human-in-the-loop review for final prioritization
-
----
-
-## Citation
-
-If you use this work, please cite:
-
-```bibtex
-@software{gaughan2026gnn_antibiotics,
-  author = {Gaughan, Christopher L.},
-  title = {GNN-Guided Antibiotic Discovery: A Rigorous Computational Pipeline},
-  year = {2026},
-  url = {https://github.com/[username]/GNN_antibiotics}
-}
-```
-
----
-
-## Author
-
-**Christopher L. Gaughan, Ph.D.**  
-Chemical and Biochemical Engineering, Rutgers University
-
-Expertise: Computational antibody developability, molecular dynamics simulations, ML for drug discovery, bioprocess development.
-
----
+1. Veličković P, Cucurull G, Casanova A, Romero A, Liò P, Bengio Y. "Graph Attention Networks."
+   *International Conference on Learning Representations (ICLR)*, 2018. arXiv:1710.10903.
+2. Fey M, Lenssen JE. "Fast Graph Representation Learning with PyTorch Geometric." *ICLR Workshop
+   on Representation Learning on Graphs and Manifolds*, 2019. arXiv:1903.02428.
+3. Bemis GW, Murcko MA. "The properties of known drugs. 1. Molecular frameworks." *Journal of
+   Medicinal Chemistry*, 1996;39(15):2887–2893. doi:10.1021/jm9602928.
+4. Degen J, Wegscheid-Gerlach C, Zaliani A, Rarey M. "On the Art of Compiling and Using
+   'Drug-Like' Chemical Fragment Spaces." *ChemMedChem*, 2008;3(10):1503–1507.
+   doi:10.1002/cmdc.200800178.
+5. Ertl P, Schuffenhauer A. "Estimation of synthetic accessibility score of drug-like molecules
+   based on molecular complexity and fragment contributions." *Journal of Cheminformatics*,
+   2009;1:8. doi:10.1186/1758-2946-1-8.
+6. Bickerton GR, Paolini GV, Besnard J, Muresan S, Hopkins AL. "Quantifying the chemical beauty
+   of drugs." *Nature Chemistry*, 2012;4(2):90–98. doi:10.1038/nchem.1243.
+7. Trott O, Olson AJ. "AutoDock Vina: improving the speed and accuracy of docking with a new
+   scoring function, efficient optimization, and multithreading." *Journal of Computational
+   Chemistry*, 2010;31(2):455–461. doi:10.1002/jcc.21334.
+8. Eberhardt J, Santos-Martins D, Tillack AF, Forli S. "AutoDock Vina 1.2.0: New Docking Methods,
+   Expanded Force Field, and Python Bindings." *Journal of Chemical Information and Modeling*,
+   2021;61(8):3891–3898. doi:10.1021/acs.jcim.1c00203.
+9. Zdrazil B, Felix E, Hunter F, et al. "The ChEMBL Database in 2023: a drug discovery platform
+   spanning multiple bioactivity data types and time periods." *Nucleic Acids Research*,
+   2024;52(D1):D1180–D1192. doi:10.1093/nar/gkad1004.
+10. Landrum G, et al. "RDKit: Open-source cheminformatics." https://www.rdkit.org
+11. Ramsundar B, Eastman P, Walters P, Pande V, Leswing K, Wu Z. *Deep Learning for the Life
+    Sciences.* O'Reilly Media, 2019. (DeepChem)
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT © Christopher L. Gaughan. See [LICENSE](LICENSE).
 
 ---
 
-## Acknowledgments
-
-- ChEMBL database for bioactivity data
-- PyTorch Geometric team
-- RDKit community
+*This is a computational hypothesis-generation pipeline for research and portfolio purposes.
+It is not a validated drug-discovery result and makes no therapeutic claims.*

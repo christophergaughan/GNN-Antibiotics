@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# Jupyter / Colab scratch
+*.log
+
+# Data & model artifacts (ChEMBL is pulled live; don't vendor large files)
+*.csv
+*.parquet
+*.pt
+*.pth
+*.pdb
+*.pdbqt
+*.sdf
+models/
+results/
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / env
+.env
+*.key
