@@ -2,9 +2,10 @@
 
 **Uncertainty-aware Graph Attention Networks for DNA Gyrase B (GyrB) inhibitor discovery — with an honest account of where the model fails.**
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](#reproducing)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/christophergaughan/GNN-Antibiotics/blob/main/notebooks/GNN_Antibiotic_Discovery_GyrB.ipynb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](#reproducing)
+[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-red.svg)](https://pytorch.org/)
 
 **Christopher L. Gaughan, Ph.D.** — *AntibodyML Consulting LLC*
 
@@ -37,9 +38,15 @@ not blemishes in the writeup — they **are** the result, and they are the point
 | Honest generalization gap | **+0.055 AUC** | — |
 
 Dataset: ~1,000 GyrB compounds, **232 active / 768 inactive** (≈3:1 imbalance). The scaffold
-(Murcko) split forces the model to predict activity for *entirely unseen chemotypes*; the
-random split lets structurally similar molecules leak across train/test and inflates the AUC.
-The ~0.055 gap is the cost of that leakage — the number a random-split-only report would hide.
+(Murcko) split forces prediction on *entirely unseen chemotypes*; the random split lets
+structurally similar molecules leak across train/test and inflates the AUC. The ~0.055 gap is
+the cost of that leakage — the number a random-split-only report would quietly hide.
+
+![Scaffold vs. random split comparison](figures/scaffold_split_comparison.png)
+*Scaffold-split AUC vs. the inflated random-split AUC — the "honest vs. flattering" gap.*
+
+![ROC curves](figures/roc_curves.png)
+*Ensemble ROC under the scaffold split.*
 
 ## Pipeline
 
@@ -60,7 +67,56 @@ The ~0.055 gap is the cost of that leakage — the number a random-split-only re
 9. **Lead optimization** — 32 medicinal-chemistry analogs (bioisosteres, halogen scans,
    heteroatom walks); Pareto front over ML score × docking score.
 
-## What the model gets wrong (read this before the plots)
+## Model architecture
+
+```
+GATAntibiotics(
+  Input: 9 atomic features (atomic number, degree, formal charge, hybridization,
+         aromaticity, H-count, ring membership, ring size, chirality)
+
+  (input_proj): Linear(9 -> 128)
+  (gat_layers): 3 x GATConv(128, 32, heads=4) + residual connections
+  (batch_norms): 3 x BatchNorm1d(128)
+  (gate_nn):    Global attention pooling -> Linear(128 -> 64) -> ELU -> Linear(64 -> 1) -> Sigmoid
+  (classifier): Linear(128 -> 64) -> ELU -> Dropout -> Linear(64 -> 1)
+
+  Parameters: 68,994
+)
+```
+
+## Results, in pictures
+
+**Data & training**
+
+![Data distribution](figures/data_distribution.png)
+*Activity-class balance and property distributions of the GyrB set (≈3:1 inactive:active).*
+
+![Training curves](figures/training_curves.png)
+*Ensemble training with early stopping (patience 20).*
+
+**Generation & drug-likeness**
+
+![Generated candidate distribution](figures/generated_candidates_distribution.png)
+*Predicted-activity distribution of BRICS-generated candidates (2,000 → 110 drug-like → 2 with P > 0.5).*
+
+![Synthetic accessibility](figures/synthetic_accessibility.png)
+*SAScore filtering; BRICS recombination can produce synthetically unrealistic molecules, so SAScore ≤ 4 removes the worst offenders.*
+
+**ADMET & docking**
+
+![ADMET profile](figures/admet_profile.png)
+*ADMET flags across the top candidates: PAINS 0/50, Brenk 50/50 (pyridine N-oxide motif — see notebook caveat), hERG high-risk 30/50, AMES all low.*
+
+![Docking validation](figures/docking_validation.png)
+*AutoDock Vina into GyrB (`4DUH`): 20/20 docked, −6.87 to −5.79 kcal/mol. ML–docking correlation is only r = 0.291 (see below).*
+
+![Pareto frontier](figures/pareto_frontier.png)
+*ML score × docking score kept as separate axes — a Pareto front, not a collapsed "validated" number.*
+
+![Lead structures](figures/lead_structures.png)
+*Pareto-optimal leads; 32 analogs explored (12/30 improved ML, 8/30 docking, 4/30 both).*
+
+## What the model gets wrong (read this before trusting the plots)
 
 - **It misses every known inhibitor it was shown.** Novobiocin, chlorobiocin, a coumermycin
   fragment, a pyrrolamide, and an aminopyrimidine all scored as *inactive* (P ≈ 0.05–0.18).
@@ -73,26 +129,76 @@ The ~0.055 gap is the cost of that leakage — the number a random-split-only re
 - **There is no wet-lab validation.** Every candidate is a hypothesis for synthesis
   prioritization — nothing in this repo demonstrates binding or efficacy.
 
-## On docking, specifically
+![Known GyrB inhibitors scored inactive](figures/attention_known_inhibitors.png)
+*The model calls known GyrB inhibitors inactive — an honest readout of its applicability domain, not a fluke.*
+
+![Attention: actives vs. inactives](figures/attention_comparison.png)
+*Attention still lands on chemically sensible atoms (fluorines, heterocyclic N, aromatic cores), even where the call is wrong.*
+
+### On docking, specifically
 
 Docking scores **rank**; they do not **confirm**. A −6.9 kcal/mol Vina score is a reason to look
-closer, not evidence of binding. ML score and docking score are kept as **separate axes**
-(hence the Pareto treatment) precisely because they disagree — collapsing them into one
-"validated" number would be the exact overclaim this pipeline is designed to avoid.
+closer, not evidence of binding. ML score and docking score are kept as **separate axes** (hence
+the Pareto treatment) precisely because they disagree — collapsing them into one "validated"
+number would be the exact overclaim this pipeline is designed to avoid.
+
+## Usage
+
+**Training**
+
+```python
+from models import GATAntibiotics, train_model
+
+model = GATAntibiotics(
+    input_dim=9, hidden_dim=128, num_layers=3, num_heads=4, dropout=0.3
+).to(device)
+
+model, history = train_model(model, train_loader, val_loader, epochs=150, patience=20)
+```
+
+**Inference with uncertainty**
+
+```python
+def ensemble_predict(models, smiles, device):
+    """Prediction + epistemic uncertainty from the ensemble."""
+    graph = mol_to_graph(smiles, label=0)
+    batch = Batch.from_data_list([graph]).to(device)
+    preds = []
+    for m in models:
+        m.eval()
+        with torch.no_grad():
+            preds.append(torch.sigmoid(m(batch)).item())
+    return float(np.mean(preds)), float(np.std(preds))
+
+mean, std = ensemble_predict(ensemble_models, "CC1=CC=C(C=C1)C2=CN=C(N=C2N)N", device)
+print(f"P(active) = {mean:.3f} ± {std:.3f}")
+```
+
+**Attention extraction (interpretability)**
+
+```python
+model.eval()
+out, attention_weights, gate = model(batch, return_attention=True)
+# attention_weights: per-layer (num_edges, num_heads) tensors
+# gate: (num_atoms, 1) global attention-pooling weights
+```
 
 ## Reproducing
 
-Colab-first by design (reference environment: **A100, High-RAM**). The notebook self-installs its
-dependencies and mounts Google Drive for persistence; `requirements.txt` is the reference version
-lock rather than the primary install path. ChEMBL data is pulled live at run time, so no dataset
-is vendored here.
+Colab-first by design (reference environment: **A100, High-RAM**). Open the notebook with the
+Colab badge above; it self-installs dependencies and mounts Google Drive for persistence.
+`requirements.txt` is a reference version floor rather than the primary install path — for an
+exact lock, capture `pip freeze` from the Colab runtime (torch / torch-geometric builds are
+CUDA-specific). ChEMBL data is pulled live at run time, so no dataset is vendored here.
 
 ## Repo layout
 
 ```
 notebooks/
   GNN_Antibiotic_Discovery_GyrB.ipynb   # main v2 pipeline (this README describes it)
-  level1_proof_of_concept.ipynb         # Level-1 GCN prototype (prior work it builds on)
+  level1_proof_of_concept.ipynb         # Level-1 GCN prototype it builds on
+figures/                                 # plots exported from the notebook (see extract_figures.py)
+extract_figures.py                       # regenerates figures/ from the notebook outputs
 requirements.txt                         # reference dependency versions
 LICENSE                                  # MIT
 ```
